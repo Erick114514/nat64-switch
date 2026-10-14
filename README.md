@@ -59,7 +59,7 @@
 
 ## Android
 
-使用 Android Studio 打开 `android/` 目录，或在该目录运行 `gradlew.bat assembleDebug`。首次构建需要 JDK 17 或更高版本、Android SDK Platform 35 和 Build Tools 35；Android Studio 的 SDK Manager 会提示安装缺少的组件并接受对应许可。首次开启时 Android 会显示 VPN 授权确认；这是系统要求。应用只把 DNS 查询送到所选 DNS64 服务，其他流量不经过 VPN 隧道。DNS64 服务会收到设备查询的域名；IPv4-only 应用、硬编码 IPv4 地址、应用自带 DoH/DoT 可能绕过系统 DNS。Android 端目前代理 UDP DNS。
+使用 Android Studio 打开 `android/` 目录，或在该目录运行 `gradlew.bat assembleDebug`。首次构建需要 JDK 17 或更高版本、Android SDK Platform 35 和 Build Tools 35；Android Studio 的 SDK Manager 会提示安装缺少的组件并接受对应许可。首次开启时 Android 会显示 VPN 授权确认；这是系统要求。应用只把 DNS 查询送到所选 DNS64 服务，其他流量不经过 VPN 隧道。Android 默认优先使用当前 Wi-Fi（如校园网）下发的 IPv6 DNS，并将 DNS 请求绑定到这条网络；这只有在网络 DNS 提供 DNS64 且网络有可达的 NAT64 时才有效。其他公共 DNS64 服务可作为备用。DNS64 服务会收到设备查询的域名；IPv4-only 应用、硬编码 IPv4 地址、应用自带 DoH/DoT 可能绕过系统 DNS。Android 端目前代理 UDP DNS。
 
 Android VPN 会占用系统唯一的 VPN 槽位；开启前请先断开其他 VPN。应用会在状态栏持续显示运行通知，用户可以随时停止。
 

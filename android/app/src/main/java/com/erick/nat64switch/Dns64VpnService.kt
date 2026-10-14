@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
+import android.net.Network
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.content.pm.ServiceInfo
@@ -15,6 +16,7 @@ import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.Inet6Address
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -23,6 +25,8 @@ class Dns64VpnService : VpnService() {
     @Volatile private var tunnel: ParcelFileDescriptor? = null
     @Volatile private var worker: Thread? = null
     @Volatile private var upstream = DEFAULT_SERVER
+    @Volatile private var upstreamNetwork: Network? = null
+    @Volatile private var upstreamScopeId = -1
 
     private val prefs by lazy { getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
 
@@ -34,6 +38,13 @@ class Dns64VpnService : VpnService() {
         if (intent?.action != ACTION_START) return START_NOT_STICKY
 
         upstream = intent.getStringExtra(EXTRA_SERVER) ?: DEFAULT_SERVER
+        upstreamNetwork = if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(EXTRA_NETWORK, Network::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(EXTRA_NETWORK)
+        }
+        upstreamScopeId = intent.getIntExtra(EXTRA_SERVER_SCOPE_ID, -1)
         prefs.edit().remove(KEY_ERROR).apply()
         try {
             enterForeground()
@@ -168,8 +179,13 @@ class Dns64VpnService : VpnService() {
         return try {
             DatagramSocket().use { socket ->
                 if (!protect(socket)) throw IllegalStateException("无法保护 DNS 上游连接。")
+                upstreamNetwork?.bindSocket(socket)
                 socket.soTimeout = 3500
-                val remote = InetSocketAddress(InetAddress.getByName(upstream), DNS_PORT)
+                val resolved = InetAddress.getByName(upstream)
+                val remoteAddress = if (resolved is Inet6Address && resolved.isLinkLocalAddress && upstreamScopeId >= 0) {
+                    Inet6Address.getByAddress(null, resolved.address, upstreamScopeId)
+                } else resolved
+                val remote = InetSocketAddress(remoteAddress, DNS_PORT)
                 socket.send(DatagramPacket(query, query.size, remote))
                 val data = ByteArray(8192)
                 val answer = DatagramPacket(data, data.size)
@@ -261,6 +277,8 @@ class Dns64VpnService : VpnService() {
         const val ACTION_START = "com.erick.nat64switch.START"
         const val ACTION_STOP = "com.erick.nat64switch.STOP"
         const val EXTRA_SERVER = "server"
+        const val EXTRA_NETWORK = "network"
+        const val EXTRA_SERVER_SCOPE_ID = "server-scope-id"
         private const val DEFAULT_SERVER = "2a00:1098:2b::1"
         private const val TUN_ADDRESS = "10.64.0.1"
         private const val DNS_ADDRESS = "10.64.0.2"
