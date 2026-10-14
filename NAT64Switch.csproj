@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>NAT64Switch</AssemblyName>
     <RootNamespace>Nat64Switch</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>Erick114514</Authors>
     <Description>Windows DNS64/NAT64 switcher and connectivity tester.</Description>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

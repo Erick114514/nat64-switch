@@ -6,3 +6,7 @@ artifacts/
 .vs/
 *.user
 *.suo
+.gradle/
+android/.gradle/
+android/local.properties
+android/**/build/

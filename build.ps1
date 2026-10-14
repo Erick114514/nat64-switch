@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $artifacts = Join-Path $root "artifacts"
 $output = Join-Path $artifacts "publish"
-$version = "1.0.0"
+$version = "1.1.0"
 $zip = Join-Path $artifacts "NAT64Switch-$Runtime-v$version.zip"
 
 dotnet publish (Join-Path $root "NAT64Switch.csproj") `
@@ -15,6 +15,9 @@ dotnet publish (Join-Path $root "NAT64Switch.csproj") `
     -r $Runtime `
     --self-contained true `
     -o $output
+
+Copy-Item (Join-Path $root "NAT64Switch-GUI.ps1") -Destination $output -Force
+Copy-Item (Join-Path $root "NAT64Switch-GUI.cmd") -Destination $output -Force
 
 New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
 Compress-Archive -Path (Join-Path $output "*") -DestinationPath $zip -Force

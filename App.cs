@@ -6,13 +6,13 @@ namespace Nat64Switch;
 
 internal static class App
 {
-    private const string Version = "1.0.0";
+    private const string Version = "1.1.0";
 
     private static readonly Dns64Server[] Dns64Servers =
     {
-        new("2a00:1098:2b::1", "Mythic Beasts", "英国"),
-        new("2a01:4f8:c2c:123f::1", "Hetzner", "德国"),
-        new("2a01:4f9:c010:3f02::1", "Hetzner", "德国")
+        new("2a00:1098:2b::1", "nat64.net", "阿姆斯特丹"),
+        new("2a01:4f8:c2c:123f::1", "nat64.net", "纽伦堡"),
+        new("2a01:4f9:c010:3f02::1", "nat64.net", "赫尔辛基")
     };
 
     public static int Run(string[] args)
