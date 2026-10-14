@@ -17,6 +17,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import java.io.IOException
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.Inet6Address
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -199,13 +203,19 @@ class MainActivity : Activity() {
         val selected = servers[serverPicker.selectedItemPosition]
         worker.execute {
             val result = try {
-                val discovery = java.net.InetAddress.getAllByName("ipv4only.arpa")
-                if (discovery.none { it is Inet6Address }) {
-                    throw IllegalStateException("没有收到 DNS64 合成的 IPv6 记录。")
+                // Query the VPN's local DNS endpoint directly. Android's system resolver can
+                // use Private DNS, cached results, or suppress the underlying DNS error, which
+                // made this check report a misleading UnknownHostException.
+                val discovery = queryIpv6Records("ipv4only.arpa")
+                if (discovery.isEmpty()) {
+                    throw IllegalStateException(
+                        "VPN DNS 没有为 ipv4only.arpa 返回合成 AAAA 记录；请确认所选 DNS64 服务可用。"
+                    )
                 }
-                val addresses = java.net.InetAddress.getAllByName("ipv4.google.com")
-                    .filterIsInstance<Inet6Address>()
-                if (addresses.isEmpty()) throw IllegalStateException("IPv4-only 测试域名没有合成 IPv6 地址。")
+                val addresses = queryIpv6Records("ipv4.google.com")
+                if (addresses.isEmpty()) {
+                    throw IllegalStateException("VPN DNS 没有为 ipv4.google.com 返回 IPv6 地址。")
+                }
                 var connected = false
                 for (address in addresses) {
                     try {
@@ -229,6 +239,105 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun queryIpv6Records(domain: String): List<Inet6Address> {
+        val id = (System.nanoTime().toInt() and 0xffff)
+        val request = makeDnsAaaaQuery(domain, id)
+        val dnsServer = InetAddress.getByAddress(byteArrayOf(10, 64, 0, 2))
+        val response = ByteArray(4096)
+
+        DatagramSocket().use { socket ->
+            socket.soTimeout = 5000
+            socket.send(DatagramPacket(request, request.size, dnsServer, DNS_PORT))
+            val answer = DatagramPacket(response, response.size)
+            socket.receive(answer)
+            return parseDnsAaaaAnswer(response.copyOf(answer.length), id)
+        }
+    }
+
+    private fun makeDnsAaaaQuery(domain: String, id: Int): ByteArray {
+        val labels = domain.split('.')
+        val encodedName = ArrayList<Byte>()
+        for (label in labels) {
+            val bytes = label.toByteArray(Charsets.US_ASCII)
+            require(bytes.isNotEmpty() && bytes.size <= 63) { "DNS 域名标签长度无效。" }
+            encodedName.add(bytes.size.toByte())
+            encodedName.addAll(bytes.toList())
+        }
+        encodedName.add(0)
+
+        val query = ByteArray(12 + encodedName.size + 4)
+        query[0] = (id ushr 8).toByte()
+        query[1] = id.toByte()
+        query[2] = 1 // Recursion desired.
+        query[5] = 1 // One question.
+        var offset = 12
+        for (byte in encodedName) query[offset++] = byte
+        query[offset++] = 0
+        query[offset++] = 28 // AAAA.
+        query[offset++] = 0
+        query[offset] = 1 // IN.
+        return query
+    }
+
+    private fun parseDnsAaaaAnswer(response: ByteArray, expectedId: Int): List<Inet6Address> {
+        if (response.size < 12) throw IOException("DNS 响应过短。")
+        val id = readU16(response, 0)
+        if (id != expectedId) throw IOException("DNS 响应编号不匹配。")
+        val flags = readU16(response, 2)
+        if (flags and 0x8000 == 0) throw IOException("收到的不是 DNS 响应。")
+        val rcode = flags and 0x000f
+        if (rcode != 0) throw IOException("DNS 服务返回错误码 $rcode。")
+
+        val questionCount = readU16(response, 4)
+        val answerCount = readU16(response, 6)
+        var offset = 12
+        repeat(questionCount) {
+            offset = skipDnsName(response, offset)
+            if (offset + 4 > response.size) throw IOException("DNS 问题区不完整。")
+            offset += 4
+        }
+
+        val addresses = mutableListOf<Inet6Address>()
+        repeat(answerCount) {
+            offset = skipDnsName(response, offset)
+            if (offset + 10 > response.size) throw IOException("DNS 答案区不完整。")
+            val type = readU16(response, offset)
+            val recordClass = readU16(response, offset + 2)
+            val dataLength = readU16(response, offset + 8)
+            offset += 10
+            if (offset + dataLength > response.size) throw IOException("DNS 记录长度无效。")
+            if (type == 28 && recordClass == 1 && dataLength == 16) {
+                val address = InetAddress.getByAddress(response.copyOfRange(offset, offset + 16))
+                if (address is Inet6Address) addresses.add(address)
+            }
+            offset += dataLength
+        }
+        return addresses
+    }
+
+    private fun skipDnsName(packet: ByteArray, start: Int): Int {
+        var offset = start
+        while (true) {
+            if (offset >= packet.size) throw IOException("DNS 域名字段不完整。")
+            val length = packet[offset].toInt() and 0xff
+            when {
+                length == 0 -> return offset + 1
+                length and 0xc0 == 0xc0 -> {
+                    if (offset + 1 >= packet.size) throw IOException("DNS 压缩指针不完整。")
+                    return offset + 2
+                }
+                length and 0xc0 != 0 -> throw IOException("DNS 域名编码无效。")
+                else -> {
+                    offset += length + 1
+                    if (offset > packet.size) throw IOException("DNS 域名字段不完整。")
+                }
+            }
+        }
+    }
+
+    private fun readU16(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xff) shl 8) or (bytes[offset + 1].toInt() and 0xff)
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun matchWrap() = LinearLayout.LayoutParams(
@@ -238,5 +347,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_VPN = 31
+        private const val DNS_PORT = 53
     }
 }
