@@ -13,11 +13,14 @@ import android.os.ParcelFileDescriptor
 import android.content.pm.ServiceInfo
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.Inet6Address
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 class Dns64VpnService : VpnService() {
@@ -176,25 +179,41 @@ class Dns64VpnService : VpnService() {
     }
 
     private fun forwardDns(query: ByteArray): ByteArray? {
-        return try {
+        val resolved = try {
+            val address = InetAddress.getByName(upstream)
+            if (address is Inet6Address && address.isLinkLocalAddress && upstreamScopeId >= 0) {
+                Inet6Address.getByAddress(null, address.address, upstreamScopeId)
+            } else address
+        } catch (_: Exception) { return null }
+        val remote = InetSocketAddress(resolved, DNS_PORT)
+        try {
             DatagramSocket().use { socket ->
                 if (!protect(socket)) throw IllegalStateException("无法保护 DNS 上游连接。")
                 upstreamNetwork?.bindSocket(socket)
-                socket.soTimeout = 3500
-                val resolved = InetAddress.getByName(upstream)
-                val remoteAddress = if (resolved is Inet6Address && resolved.isLinkLocalAddress && upstreamScopeId >= 0) {
-                    Inet6Address.getByAddress(null, resolved.address, upstreamScopeId)
-                } else resolved
-                val remote = InetSocketAddress(remoteAddress, DNS_PORT)
+                socket.soTimeout = 2500
                 socket.send(DatagramPacket(query, query.size, remote))
                 val data = ByteArray(8192)
                 val answer = DatagramPacket(data, data.size)
                 socket.receive(answer)
-                data.copyOf(answer.length)
+                return data.copyOf(answer.length)
             }
-        } catch (_: Exception) {
-            null
-        }
+        } catch (_: Exception) { /* Try TCP DNS when UDP/53 is filtered. */ }
+        return try {
+            Socket().use { socket ->
+                if (!protect(socket)) throw IllegalStateException("无法保护 DNS 上游连接。")
+                upstreamNetwork?.bindSocket(socket)
+                socket.connect(remote, 2500)
+                socket.soTimeout = 2500
+                val output = DataOutputStream(socket.getOutputStream())
+                output.writeShort(query.size)
+                output.write(query)
+                output.flush()
+                val input = DataInputStream(socket.getInputStream())
+                val length = input.readUnsignedShort()
+                if (length < 12 || length > 8192) return null
+                ByteArray(length).also { input.readFully(it) }
+            }
+        } catch (_: Exception) { null }
     }
 
     private fun makeIpv4UdpReply(original: ByteArray, request: DnsRequest, dns: ByteArray): ByteArray {

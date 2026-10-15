@@ -15,7 +15,9 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.ArrayAdapter
+import android.widget.AdapterView
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -35,6 +37,7 @@ class MainActivity : Activity() {
 
     private val servers = listOf(
         Server("当前网络 DNS（校园网推荐）", AUTO_SERVER),
+        Server("自定义 DNS64 节点", CUSTOM_SERVER),
         Server("nat64.net · 阿姆斯特丹", "2a00:1098:2b::1"),
         Server("nat64.net · 纽伦堡", "2a01:4f8:c2c:123f::1"),
         Server("nat64.net · 赫尔辛基", "2a01:4f9:c010:3f02::1")
@@ -43,6 +46,7 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var status: TextView
     private lateinit var serverPicker: Spinner
+    private lateinit var customServer: EditText
     private lateinit var toggle: Button
     private lateinit var test: Button
     private val prefs by lazy { getSharedPreferences(Dns64VpnService.PREFS, Context.MODE_PRIVATE) }
@@ -112,6 +116,21 @@ class MainActivity : Activity() {
         }
         root.addView(serverPicker, matchWrap())
 
+        customServer = EditText(this).apply {
+            hint = "输入节点的 IPv6 DNS 地址，例如 2001:db8::1"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+            setText(prefs.getString(KEY_CUSTOM_SERVER, ""))
+            visibility = View.GONE
+        }
+        root.addView(customServer, matchWrap())
+        serverPicker.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                customServer.visibility = if (servers[position].address == CUSTOM_SERVER) View.VISIBLE else View.GONE
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
         toggle = Button(this).apply {
             text = "一键开启 NAT64"
             isAllCaps = false
@@ -136,7 +155,7 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(8) })
 
         root.addView(TextView(this).apply {
-            text = "首次开启需确认 Android VPN 授权。校园网推荐选择“当前网络 DNS”，让查询走校园网下发的 IPv6 DNS；只有该 DNS 提供 DNS64 且校园网有 NAT64 时才能转换成功。应用仅代理 UDP DNS，其他流量不经过 VPN。系统专用 DNS、应用自带 DoH/DoT 或 IPv4 字面地址可能绕过。"
+            text = "首次开启需确认 Android VPN 授权。自定义节点须填写可达的 IPv6 DNS64 地址，而且该节点必须配套可达的 NAT64 网关；仅填写普通 DNS 无法转换。应用仅代理系统的 UDP DNS 查询，其他流量不经过 VPN。系统专用 DNS、应用自带 DoH/DoT 或 IPv4 字面地址可能绕过。"
             textSize = 13f
             setTextColor(Color.rgb(92, 104, 119))
             setPadding(0, dp(18), 0, 0)
@@ -175,43 +194,72 @@ class MainActivity : Activity() {
 
     private fun startVpnService() {
         val selected = servers[serverPicker.selectedItemPosition]
+        val network = findPreferredPhysicalNetwork()
+        if (network == null) {
+            status.text = "当前网络没有可用的 IPv6 连接。请连接校园网 Wi‑Fi 后重试。"
+            toggle.isEnabled = true
+            return
+        }
         val intent = Intent(this, Dns64VpnService::class.java)
             .setAction(Dns64VpnService.ACTION_START)
+            .putExtra(Dns64VpnService.EXTRA_NETWORK, network)
         if (selected.address == AUTO_SERVER) {
-            val networkDns = findCurrentNetworkIpv6Dns()
+            val networkDns = findCurrentNetworkIpv6Dns(network)
             if (networkDns == null) {
                 status.text = "当前网络没有可用的 IPv6 DNS。请连接校园网 Wi‑Fi 后重试。"
                 toggle.isEnabled = true
                 return
             }
-            intent.putExtra(Dns64VpnService.EXTRA_SERVER, networkDns.second.hostAddress)
-            intent.putExtra(Dns64VpnService.EXTRA_NETWORK, networkDns.first)
-            intent.putExtra(Dns64VpnService.EXTRA_SERVER_SCOPE_ID, networkDns.second.scopeId)
-            status.text = "正在连接当前网络 DNS · ${networkDns.second.hostAddress}…"
+            intent.putExtra(Dns64VpnService.EXTRA_SERVER, networkDns.hostAddress)
+            intent.putExtra(Dns64VpnService.EXTRA_SERVER_SCOPE_ID, networkDns.scopeId)
+            status.text = "正在连接当前网络 DNS · ${networkDns.hostAddress}…"
         } else {
-            intent.putExtra(Dns64VpnService.EXTRA_SERVER, selected.address)
+            val address = if (selected.address == CUSTOM_SERVER) {
+                val input = customServer.text.toString().trim()
+                val parsed = try {
+                    if (!input.contains(':') || input.contains('%')) null
+                    else InetAddress.getByName(input) as? Inet6Address
+                } catch (_: Exception) { null }
+                if (parsed == null || parsed.isAnyLocalAddress || parsed.isLoopbackAddress || parsed.isMulticastAddress || parsed.isLinkLocalAddress) {
+                    customServer.error = "请输入可路由的 IPv6 DNS 地址，不支持域名、端口或本地链路地址"
+                    status.text = "自定义节点地址无效。"
+                    toggle.isEnabled = true
+                    return
+                }
+                prefs.edit().putString(KEY_CUSTOM_SERVER, parsed.hostAddress).apply()
+                parsed.hostAddress
+            } else selected.address
+            intent.putExtra(Dns64VpnService.EXTRA_SERVER, address)
             status.text = "正在连接 ${selected.label}…"
         }
         startServiceCompat(intent)
         handler.postDelayed({ refresh(); toggle.isEnabled = true }, 1000)
     }
 
-    private fun findCurrentNetworkIpv6Dns(): Pair<Network, Inet6Address>? {
+    private fun findPreferredPhysicalNetwork(): Network? {
         val connectivity = getSystemService(ConnectivityManager::class.java)
-        val activeNetwork = connectivity.activeNetwork
-        return connectivity.allNetworks.mapNotNull { network ->
+        val networks = connectivity.allNetworks.mapNotNull { network ->
             val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
             if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
                 capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
-            val dns = connectivity.getLinkProperties(network)?.dnsServers
-                ?.filterIsInstance<Inet6Address>()
-                ?.firstOrNull { !it.isAnyLocalAddress && !it.isLoopbackAddress }
-                ?: return@mapNotNull null
-            Triple(network, dns, capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))
-        }.sortedWith(
-            compareByDescending<Triple<Network, Inet6Address, Boolean>> { it.third }
-                .thenByDescending { it.first == activeNetwork }
-        ).firstOrNull()?.let { it.first to it.second }
+            network to capabilities
+        }
+        // This app is for campus Wi-Fi. Never silently test or route over mobile data.
+        val network = networks.firstOrNull {
+            it.second.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        }?.first ?: return null
+        val hasIpv6 = connectivity.getLinkProperties(network)?.linkAddresses?.any {
+            val address = it.address
+            address is Inet6Address && !address.isLinkLocalAddress && !address.isLoopbackAddress
+        } ?: false
+        return if (hasIpv6) network else null
+    }
+
+    private fun findCurrentNetworkIpv6Dns(network: Network): Inet6Address? {
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        return connectivity.getLinkProperties(network)?.dnsServers
+            ?.filterIsInstance<Inet6Address>()
+            ?.firstOrNull { !it.isAnyLocalAddress && !it.isLoopbackAddress }
     }
 
     private fun startServiceCompat(intent: Intent) {
@@ -231,6 +279,7 @@ class MainActivity : Activity() {
         toggle.text = if (active) "一键关闭并恢复" else "一键开启 NAT64"
         toggle.setBackgroundColor(if (active) Color.rgb(90, 103, 120) else Color.rgb(30, 116, 210))
         serverPicker.isEnabled = !active
+        customServer.isEnabled = !active
         test.isEnabled = active
     }
 
@@ -254,9 +303,12 @@ class MainActivity : Activity() {
                     throw IllegalStateException("VPN DNS 没有为 ipv4.google.com 返回 IPv6 地址。")
                 }
                 var connected = false
+                val network = findPreferredPhysicalNetwork()
+                    ?: throw IllegalStateException("当前网络没有可用的 IPv6 连接。")
                 for (address in addresses) {
                     try {
                         Socket().use { socket ->
+                            network.bindSocket(socket)
                             socket.connect(InetSocketAddress(address, 443), 5000)
                             connected = true
                         }
@@ -288,7 +340,7 @@ class MainActivity : Activity() {
         val response = ByteArray(4096)
 
         DatagramSocket().use { socket ->
-            socket.soTimeout = 5000
+            socket.soTimeout = 8000
             socket.send(DatagramPacket(request, request.size, dnsServer, DNS_PORT))
             val answer = DatagramPacket(response, response.size)
             socket.receive(answer)
@@ -391,5 +443,7 @@ class MainActivity : Activity() {
         private const val REQUEST_VPN = 31
         private const val DNS_PORT = 53
         private const val AUTO_SERVER = "@current-network"
+        private const val CUSTOM_SERVER = "@custom"
+        private const val KEY_CUSTOM_SERVER = "custom-server"
     }
 }

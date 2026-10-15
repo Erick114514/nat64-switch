@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $artifacts = Join-Path $root "artifacts"
 $output = Join-Path $artifacts "publish"
-$version = "1.1.0"
+$version = "1.1.3"
 $zip = Join-Path $artifacts "NAT64Switch-$Runtime-v$version.zip"
 
 dotnet publish (Join-Path $root "NAT64Switch.csproj") `
@@ -15,6 +15,7 @@ dotnet publish (Join-Path $root "NAT64Switch.csproj") `
     -r $Runtime `
     --self-contained true `
     -o $output
+if ($LASTEXITCODE -ne 0) { throw "dotnet publish 失败，退出码：$LASTEXITCODE" }
 
 Copy-Item (Join-Path $root "NAT64Switch-GUI.ps1") -Destination $output -Force
 Copy-Item (Join-Path $root "NAT64Switch-GUI.cmd") -Destination $output -Force

@@ -4,11 +4,13 @@ Add-Type -AssemblyName System.Drawing
 $ErrorActionPreference = 'Stop'
 $script:ScriptPath = $PSCommandPath
 $script:Servers = @(
+    [pscustomobject]@{ Name = '自定义 DNS64 节点'; Address = '' },
     [pscustomobject]@{ Name = 'nat64.net · 阿姆斯特丹'; Address = '2a00:1098:2b::1' },
     [pscustomobject]@{ Name = 'nat64.net · 纽伦堡'; Address = '2a01:4f8:c2c:123f::1' },
     [pscustomobject]@{ Name = 'nat64.net · 赫尔辛基'; Address = '2a01:4f9:c010:3f02::1' }
 )
 $script:StatePath = Join-Path $env:LOCALAPPDATA 'NAT64Switch\state.json'
+$script:CustomPath = Join-Path $env:LOCALAPPDATA 'NAT64Switch\custom-dns.txt'
 
 function Start-Elevated {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -65,6 +67,23 @@ function Get-SavedAdapterState($Adapter) {
     @(Read-SavedState | Where-Object { $_.InterfaceGuid -eq $Adapter.InterfaceGuid } | Select-Object -First 1)[0]
 }
 
+function Get-SelectedServer {
+    $selected = $script:ServerBox.SelectedItem
+    if ($null -eq $selected) { throw '请选择 DNS64 节点。' }
+    if ($selected.Address) { return $selected }
+    $address = $script:CustomBox.Text.Trim()
+    $parsed = $null
+    if ($address.Contains('%') -or
+        -not [System.Net.IPAddress]::TryParse($address, [ref]$parsed) -or
+        $parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6 -or
+        $parsed.Equals([System.Net.IPAddress]::IPv6Any) -or
+        $parsed.Equals([System.Net.IPAddress]::IPv6Loopback) -or
+        $parsed.IsIPv6LinkLocal -or $parsed.IsIPv6Multicast) {
+        throw '请输入可路由的 IPv6 DNS 地址，不支持域名、端口或本地链路地址。'
+    }
+    [pscustomobject]@{ Name = $selected.Name; Address = $parsed.ToString() }
+}
+
 function Test-Nat64([string]$ServerAddress) {
     $prefixRecords = @(
         Resolve-DnsName -Name 'ipv4only.arpa' -Type AAAA -Server $ServerAddress -DnsOnly -ErrorAction Stop |
@@ -109,8 +128,8 @@ Start-Elevated
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'NAT64 Switch'
 $form.StartPosition = 'CenterScreen'
-$form.Size = New-Object System.Drawing.Size(540, 510)
-$form.MinimumSize = New-Object System.Drawing.Size(500, 470)
+$form.Size = New-Object System.Drawing.Size(540, 580)
+$form.MinimumSize = New-Object System.Drawing.Size(500, 540)
 $form.BackColor = [System.Drawing.Color]::FromArgb(246, 248, 251)
 $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10)
 
@@ -166,8 +185,20 @@ $script:ServerBox.Location = New-Object System.Drawing.Point(30, 278)
 $script:ServerBox.Size = New-Object System.Drawing.Size(462, 30)
 $script:ServerBox.DisplayMember = 'Name'
 foreach ($server in $script:Servers) { [void]$script:ServerBox.Items.Add($server) }
-$script:ServerBox.SelectedIndex = 0
+$script:ServerBox.SelectedIndex = 1
 $form.Controls.Add($script:ServerBox)
+
+$script:CustomBox = New-Object System.Windows.Forms.TextBox
+$script:CustomBox.Location = New-Object System.Drawing.Point(30, 320)
+$script:CustomBox.Size = New-Object System.Drawing.Size(462, 30)
+$script:CustomBox.Visible = $false
+if (Test-Path -LiteralPath $script:CustomPath) {
+    $script:CustomBox.Text = (Get-Content -LiteralPath $script:CustomPath -Raw).Trim()
+}
+$form.Controls.Add($script:CustomBox)
+$script:ServerBox.Add_SelectedIndexChanged({
+    $script:CustomBox.Visible = -not [bool]$script:ServerBox.SelectedItem.Address
+})
 
 $script:ToggleButton = New-Object System.Windows.Forms.Button
 $script:ToggleButton.Text = '一键开启 NAT64'
@@ -176,21 +207,21 @@ $script:ToggleButton.ForeColor = [System.Drawing.Color]::White
 $script:ToggleButton.BackColor = [System.Drawing.Color]::FromArgb(30, 116, 210)
 $script:ToggleButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $script:ToggleButton.FlatAppearance.BorderSize = 0
-$script:ToggleButton.Location = New-Object System.Drawing.Point(30, 330)
+$script:ToggleButton.Location = New-Object System.Drawing.Point(30, 370)
 $script:ToggleButton.Size = New-Object System.Drawing.Size(462, 54)
 $form.Controls.Add($script:ToggleButton)
 
 $script:TestButton = New-Object System.Windows.Forms.Button
 $script:TestButton.Text = '检查 NAT64 连通性'
-$script:TestButton.Location = New-Object System.Drawing.Point(30, 398)
+$script:TestButton.Location = New-Object System.Drawing.Point(30, 438)
 $script:TestButton.Size = New-Object System.Drawing.Size(210, 34)
 $form.Controls.Add($script:TestButton)
 
 $script:DetailsLabel = New-Object System.Windows.Forms.Label
-$script:DetailsLabel.Text = 'DNS 查询会发送给所选公共服务商。校园网计费方式以学校规则为准。'
+$script:DetailsLabel.Text = '自定义地址须提供 DNS64，并配套可达的 NAT64 网关；普通 DNS 不够。'
 $script:DetailsLabel.ForeColor = [System.Drawing.Color]::FromArgb(92, 104, 119)
-$script:DetailsLabel.Location = New-Object System.Drawing.Point(30, 442)
-$script:DetailsLabel.Size = New-Object System.Drawing.Size(470, 36)
+$script:DetailsLabel.Location = New-Object System.Drawing.Point(30, 482)
+$script:DetailsLabel.Size = New-Object System.Drawing.Size(470, 58)
 $form.Controls.Add($script:DetailsLabel)
 
 $script:AdapterBox.Items.Clear()
@@ -205,15 +236,20 @@ function Refresh-View {
         $script:ToggleButton.Enabled = $false
         $script:TestButton.Enabled = $false
         $script:ServerBox.Enabled = $false
+        $script:CustomBox.Enabled = $false
         return
     }
 
     try {
         $currentDns = @(Get-CurrentDns $adapter.InterfaceIndex)
-        $active = @($currentDns | Where-Object { $_ -in @($script:Servers.Address) }).Count -gt 0
+        $saved = Get-SavedAdapterState $adapter
+        $knownServers = @($script:Servers.Address | Where-Object { $_ })
+        if ($saved -and $saved.AppliedServer) { $knownServers += $saved.AppliedServer }
+        $active = @($currentDns | Where-Object { $_ -in $knownServers }).Count -gt 0
         $script:ToggleButton.Enabled = $true
         $script:TestButton.Enabled = $true
         $script:ServerBox.Enabled = -not $active
+        $script:CustomBox.Enabled = -not $active
         if ($active) {
             $statusLabel.Text = "NAT64 已开启 · $($adapter.Name)"
             $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(24, 126, 74)
@@ -241,9 +277,11 @@ $script:ToggleButton.Add_Click({
     $form.UseWaitCursor = $true
     try {
         $currentDns = @(Get-CurrentDns $adapter.InterfaceIndex)
-        $isEnabled = @($currentDns | Where-Object { $_ -in @($script:Servers.Address) }).Count -gt 0
+        $saved = Get-SavedAdapterState $adapter
+        $knownServers = @($script:Servers.Address | Where-Object { $_ })
+        if ($saved -and $saved.AppliedServer) { $knownServers += $saved.AppliedServer }
+        $isEnabled = @($currentDns | Where-Object { $_ -in $knownServers }).Count -gt 0
         if ($isEnabled) {
-            $saved = Get-SavedAdapterState $adapter
             if ($null -ne $saved -and @($saved.Servers).Count -gt 0) {
                 Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv6 -ServerAddresses @($saved.Servers) -ErrorAction Stop
             } else {
@@ -254,19 +292,23 @@ $script:ToggleButton.Add_Click({
             Clear-DnsClientCache
             [System.Windows.Forms.MessageBox]::Show('已恢复开启前保存的 IPv6 DNS 设置。', 'NAT64 Switch', 'OK', 'Information') | Out-Null
         } else {
+            $server = Get-SelectedServer
             $entries = @(Read-SavedState)
             $saved = @($entries | Where-Object { $_.InterfaceGuid -eq $adapter.InterfaceGuid } | Select-Object -First 1)
-            if ($saved.Count -eq 0) {
-                $entries += [pscustomobject]@{
-                    InterfaceGuid = $adapter.InterfaceGuid
-                    InterfaceName = $adapter.Name
-                    Servers = @($currentDns)
-                    SavedAt = (Get-Date).ToString('o')
-                }
-                Write-SavedState $entries
+            $previousDns = if ($saved.Count -gt 0) { @($saved[0].Servers) } else { @($currentDns) }
+            $entries = @($entries | Where-Object { $_.InterfaceGuid -ne $adapter.InterfaceGuid })
+            $entries += [pscustomobject]@{
+                InterfaceGuid = $adapter.InterfaceGuid
+                InterfaceName = $adapter.Name
+                Servers = @($previousDns)
+                AppliedServer = $server.Address
+                SavedAt = (Get-Date).ToString('o')
             }
-            $server = $script:ServerBox.SelectedItem
+            Write-SavedState $entries
             Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv6 -ServerAddresses $server.Address -ErrorAction Stop
+            if (-not $script:ServerBox.SelectedItem.Address) {
+                [System.IO.File]::WriteAllText($script:CustomPath, $server.Address, (New-Object System.Text.UTF8Encoding($false)))
+            }
             Clear-DnsClientCache
             [System.Windows.Forms.MessageBox]::Show("已将 $($adapter.Name) 的 IPv6 DNS 切换到 $($server.Name)。", 'NAT64 Switch', 'OK', 'Information') | Out-Null
         }
@@ -279,11 +321,15 @@ $script:ToggleButton.Add_Click({
 })
 
 $script:TestButton.Add_Click({
-    $server = $script:ServerBox.SelectedItem
-    if ($null -eq $server) { return }
     $script:TestButton.Enabled = $false
     $form.UseWaitCursor = $true
     try {
+        $adapter = $script:AdapterBox.SelectedItem
+        $saved = if ($adapter) { Get-SavedAdapterState $adapter } else { $null }
+        $currentDns = if ($adapter) { @(Get-CurrentDns $adapter.InterfaceIndex) } else { @() }
+        $server = if ($saved -and $saved.AppliedServer -and $saved.AppliedServer -in $currentDns) {
+            [pscustomobject]@{ Name = '当前启用节点'; Address = $saved.AppliedServer }
+        } else { Get-SelectedServer }
         $message = Test-Nat64 $server.Address
         [System.Windows.Forms.MessageBox]::Show($message, '连通性检查通过', 'OK', 'Information') | Out-Null
     } catch {
